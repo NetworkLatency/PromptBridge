@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "promptbridge"
+version = "0.1.0"
+description = "Context-first multilingual agent gateway for local-first prompt assembly, memory retrieval, and traceable context transforms."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "PromptBridge" }
+]
+dependencies = []
+
+[project.scripts]
+pb = "promptbridge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
