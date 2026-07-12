@@ -46,7 +46,22 @@ class _MockHandler(BaseHTTPRequestHandler):
                     "output": [
                         {
                             "type": "message",
-                            "content": [{"type": "output_text", "text": "Review the architecture."}],
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": json.dumps(
+                                        {
+                                            "source_language": "Simplified Chinese",
+                                            "objective": "Review the architecture.",
+                                            "context": [],
+                                            "input_material": [],
+                                            "constraints": [],
+                                            "expected_deliverable": None,
+                                            "output_preferences": [],
+                                        }
+                                    ),
+                                }
+                            ],
                         }
                     ],
                     "usage": {"input_tokens": 10, "output_tokens": 4},
@@ -62,7 +77,10 @@ class _MockHandler(BaseHTTPRequestHandler):
                 "id": "chat_execute",
                 "model": "runner-model",
                 "choices": [
-                    {"message": {"content": "架构评审完成。"}, "finish_reason": "stop"}
+                    {
+                        "message": {"content": "Architecture review completed."},
+                        "finish_reason": "stop",
+                    }
                 ],
                 "usage": {"prompt_tokens": 20, "completion_tokens": 6},
             },
@@ -114,11 +132,11 @@ class GatewayIntegrationTest(unittest.TestCase):
                 "请评审这个架构",
                 provider="runner",
                 compiler_provider="compiler",
-                output_language="Chinese",
                 max_retries=0,
             )
 
-            self.assertEqual(result.answer, "架构评审完成。")
+            self.assertEqual(result.answer, "Architecture review completed.")
+            self.assertNotIn("Response Language", result.prompt.text)
             self.assertEqual([item["path"] for item in _MockHandler.requests], [
                 "/v1/responses",
                 "/v1/chat/completions",
@@ -126,9 +144,12 @@ class GatewayIntegrationTest(unittest.TestCase):
             self.assertEqual(_MockHandler.requests[0]["headers"]["Authorization"], "Bearer compile-key")
             self.assertEqual(_MockHandler.requests[1]["headers"]["Authorization"], "Bearer run-key")
             trace = read_json(result.trace_path)
+            self.assertEqual(trace["schema_version"], 2)
             self.assertEqual(trace["status"], "completed")
             self.assertEqual(trace["compiler"]["provider"], "compiler")
             self.assertEqual(trace["execution"]["provider"], "runner")
+            self.assertEqual(trace["context"]["source_language"], "Simplified Chinese")
+            self.assertEqual(trace["context"]["prompt_language"], "English")
             trace_text = result.trace_path.read_text(encoding="utf-8")
             self.assertNotIn("compile-key", trace_text)
             self.assertNotIn("run-key", trace_text)
@@ -157,7 +178,7 @@ class GatewayIntegrationTest(unittest.TestCase):
         )
         client = LLMClient(profile, api_key="key", max_retries=1, sleep=lambda _: None)
         response = client.generate(instructions="Test", input_text="Test", stage="retry")
-        self.assertEqual(response.text, "架构评审完成。")
+        self.assertEqual(response.text, "Architecture review completed.")
         self.assertEqual(len(_MockHandler.requests), 2)
 
 

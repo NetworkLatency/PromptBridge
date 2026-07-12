@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 from getpass import getpass
 import json
 from pathlib import Path
@@ -15,7 +16,13 @@ from promptbridge.config import (
 )
 from promptbridge.gateway import PromptBridge
 from promptbridge.providers import LLMClient, ProviderError
-from promptbridge.storage import AppPaths, GlossaryStore, GlossaryTerm, TraceStore
+from promptbridge.storage import (
+    AppPaths,
+    GlossaryStore,
+    GlossaryTerm,
+    StorageMaintenance,
+    TraceStore,
+)
 
 
 DEFAULT_HOME = Path.home() / ".promptbridge"
@@ -34,6 +41,10 @@ def main(argv: list[str] | None = None) -> int:
 def _main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     paths = AppPaths(args.home)
+
+    if args.command == "storage":
+        return _storage_command(args, StorageMaintenance(paths))
+
     paths.ensure()
     profiles = ProfileStore(paths.providers_file)
     profiles.ensure()
@@ -64,7 +75,6 @@ def _main(argv: list[str] | None = None) -> int:
             user_input,
             provider=args.provider,
             model=args.model,
-            output_language=args.to,
             page_context=page_context,
             timeout_seconds=args.timeout,
             max_retries=args.max_retries,
@@ -81,7 +91,6 @@ def _main(argv: list[str] | None = None) -> int:
             compiler_provider=args.compiler_provider,
             model=args.model,
             compiler_model=args.compiler_model,
-            output_language=args.to,
             page_context=page_context,
             timeout_seconds=args.timeout,
             max_retries=args.max_retries,
@@ -189,6 +198,53 @@ def _glossary_command(args: argparse.Namespace, glossary: GlossaryStore) -> int:
     return 2
 
 
+def _storage_command(args: argparse.Namespace, storage: StorageMaintenance) -> int:
+    if args.storage_command == "status":
+        status = storage.status()
+        print(f"PromptBridge storage: {status.home}")
+        print(f"- home_exists: {str(status.home_exists).lower()}")
+        print(f"- artifacts: {status.artifact_files} files ({_format_bytes(status.artifact_bytes)})")
+        print(f"- traces: {status.trace_files} files ({_format_bytes(status.trace_bytes)})")
+        print(f"- managed_groups: {status.managed_groups}")
+        print(f"- orphan_artifacts: {status.orphan_artifacts}")
+        print(f"- unmanaged_files: {status.unmanaged_files}")
+        print(f"- total: {status.total_files} files ({_format_bytes(status.total_bytes)})")
+        print(f"- oldest: {_format_timestamp(status.oldest)}")
+        print(f"- newest: {_format_timestamp(status.newest)}")
+        return 0
+
+    if args.storage_command == "clean":
+        plan = storage.cleanup_plan(args.older_than)
+        mode = "apply" if args.apply else "dry-run"
+        print(f"PromptBridge storage cleanup ({mode})")
+        print(f"- cutoff: {plan.cutoff.astimezone().isoformat(timespec='seconds')}")
+        print(f"- groups: {len(plan.groups)}")
+        print(f"- files: {plan.files}")
+        print(f"- bytes: {_format_bytes(plan.bytes)}")
+        if not args.apply:
+            print("No files deleted. Re-run with --apply after reviewing this plan.")
+            return 0
+        result = storage.apply(plan)
+        print(f"Deleted {result.deleted_files} files ({_format_bytes(result.deleted_bytes)}).")
+        return 0
+
+    return 2
+
+
+def _format_bytes(value: int) -> str:
+    units = ("B", "KiB", "MiB", "GiB")
+    amount = float(value)
+    for unit in units:
+        if amount < 1024 or unit == units[-1]:
+            return f"{amount:.0f} {unit}" if unit == "B" else f"{amount:.2f} {unit}"
+        amount /= 1024
+    raise AssertionError("unreachable")
+
+
+def _format_timestamp(value: datetime | None) -> str:
+    return value.astimezone().isoformat(timespec="seconds") if value else "-"
+
+
 def _read_optional_file(path: Path | None) -> str:
     return path.read_text(encoding="utf-8") if path else ""
 
@@ -237,6 +293,26 @@ def build_parser() -> argparse.ArgumentParser:
     glossary_remove = glossary_commands.add_parser("remove")
     glossary_remove.add_argument("term")
 
+    storage = commands.add_parser("storage", help="Inspect and clean local runtime files.")
+    storage_commands = storage.add_subparsers(dest="storage_command", required=True)
+    storage_commands.add_parser("status", help="Show artifact and trace usage without writing files.")
+    storage_clean = storage_commands.add_parser(
+        "clean",
+        help="Preview or delete managed runtime files older than a number of days.",
+    )
+    storage_clean.add_argument(
+        "--older-than",
+        type=int,
+        default=30,
+        metavar="DAYS",
+        help="Select managed trace groups older than DAYS (default: 30).",
+    )
+    storage_clean.add_argument(
+        "--apply",
+        action="store_true",
+        help="Delete the previewed files; without this flag the command is read-only.",
+    )
+
     compile_parser = commands.add_parser("compile", help="Compile a request for a web or CLI model.")
     _add_request_arguments(compile_parser)
 
@@ -258,7 +334,6 @@ def _add_request_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("text", nargs="+", help="Request to compile or execute.")
     parser.add_argument("--provider", default=None, help="Provider profile; defaults to active.")
     parser.add_argument("--model", default=None, help="Override the profile's default model.")
-    parser.add_argument("--to", default=None, help="Output language; defaults to the input language.")
     parser.add_argument("--context-file", type=Path, default=None, help="Optional untrusted page context.")
     parser.add_argument("--timeout", type=int, default=60)
     parser.add_argument("--max-retries", type=int, default=2)

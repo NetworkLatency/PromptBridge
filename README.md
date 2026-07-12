@@ -1,10 +1,11 @@
 # PromptBridge
 
-PromptBridge is a local-first multilingual model gateway for personal use. It rewrites a
-non-English request into an English execution prompt, preserves code and locked technical
-terms, and either prints the prompt for a web model or executes it through a configured API.
+PromptBridge is a local-first multilingual model gateway for personal use. It compiles a
+non-English or mixed-language request into a structured English execution prompt, preserves
+code and user-controlled terminology, and either prints the prompt for a web model or executes
+it through a configured API.
 
-The current Python core is v0.3.0. A separate v0.1.0 browser extension adds an
+The current Python core is v0.4.0. A separate v0.1.0 browser extension adds an
 offline capture path while keeping the overall scope intentionally small:
 
 ```text
@@ -15,10 +16,11 @@ selected page text
 
 user request + optional captured context file
   -> exact glossary match
-  -> protected code and term placeholders
-  -> compiler model rewrites only the task
-  -> deterministic execution prompt assembly
-  -> optional downstream model execution
+  -> unique protected code and term placeholders
+  -> compiler model returns a semantic PromptIR JSON object
+  -> strict schema and placeholder validation
+  -> conditional English execution prompt assembly, with input material separated from the task
+  -> optional raw downstream model execution
   -> local artifacts + metadata-only trace
 ```
 
@@ -92,7 +94,7 @@ or traces. Each credential is bound to both the profile name and API origin.
 Compile a prompt for manual use in a web model:
 
 ```powershell
-pb compile "请评审这段 API 设计" --provider openrouter --to Chinese
+pb compile "请评审这段 API 设计" --provider openrouter
 ```
 
 Run the full two-stage API path. The compiler can be a cheap or local model while the
@@ -101,15 +103,19 @@ downstream provider uses a stronger model:
 ```powershell
 pb run "请评审这段 API 设计" `
   --compiler-provider ollama `
-  --provider openrouter `
-  --to Chinese
+  --provider openrouter
 ```
 
 Attach text selected from a page or saved response as untrusted context:
 
 ```powershell
-pb run "根据页面内容总结关键结论" --context-file selected.txt --to Chinese
+pb run "根据页面内容总结关键结论" --context-file selected.txt
 ```
+
+`pb compile` always produces an English execution prompt. It has no prompt-language or
+response-language switch. `pb run` currently prints the downstream model's raw answer and does
+not ask that model to answer in the user's language. Source language is retained only as local
+trace metadata for the planned response-reconstruction stage.
 
 Manage exact glossary locks:
 
@@ -173,6 +179,20 @@ npm.cmd run build:firefox
 The trace stores an input hash and character counts, not the original prompt or response.
 Full text exists only in the explicit local artifacts.
 
+Inspect storage without creating or changing the PromptBridge home:
+
+```powershell
+pb storage status
+```
+
+Cleanup is a dry run by default. It groups each trace with its prompt/response artifacts,
+ignores unknown files, and never touches provider profiles, glossary data, or OS credentials:
+
+```powershell
+pb storage clean --older-than 30
+pb storage clean --older-than 30 --apply
+```
+
 ## Verification
 
 ```powershell
@@ -183,10 +203,41 @@ python -m unittest discover -s tests -v
 The tests use a local mock HTTP server and make no paid API calls.
 The extension tests are pure local tests and its production builds make no network requests.
 
+## Compiler Evaluation
+
+Six focused cases cover minimal Chinese input, explicit architecture constraints, protected code
+and terminology, an English format request, Spanish input, and malicious page context. Offline
+mode uses reviewed golden PromptIR objects and makes no network requests or file writes:
+
+```powershell
+python evals/compiler_eval.py --list
+python evals/compiler_eval.py --mode offline --show-prompts
+```
+
+Live mode runs the same checks against a configured compiler model. Each selected case makes one
+model request, so live execution requires an explicit confirmation flag:
+
+```powershell
+python evals/compiler_eval.py `
+  --mode live `
+  --provider openrouter `
+  --case minimal_zh `
+  --confirm-live `
+  --show-prompts
+```
+
+The runner calls `PromptCompiler` directly and does not create artifacts or traces. Automatic
+checks cover structure, expected semantic keywords, protected content, dynamic sections, and
+untrusted-context isolation. Fluency, subtle intent preservation, and plausible-but-invented
+requirements still require human review.
+
 ## Documentation
 
 - `PROJECT_ENGINEERING.md`: current code flow and module-by-module learning guide.
 - `TECHNICAL_POSITIONING.md`: interview narrative, engineering concepts, and rejected alternatives.
 
-Selected-text capture and side-panel preview are implemented. The next milestone is the
-explicit loopback connection between the extension and the existing Python core.
+Selected-text capture, side-panel preview, and semantic English prompt compilation are
+implemented. The next standalone milestone is response reconstruction: translate the captured
+downstream answer back to the detected source language while preserving code, terms, links, and
+citations. Browser-to-core loopback integration follows after both transforms are independently
+testable.

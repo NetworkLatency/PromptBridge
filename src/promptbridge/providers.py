@@ -119,7 +119,7 @@ class LLMClient:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "promptbridge/0.3",
+            "User-Agent": "promptbridge/0.4.0",
         }
         if self.profile.auth == "bearer":
             headers["Authorization"] = f"Bearer {self.api_key}"
