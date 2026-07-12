@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PromptBridge</title>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-mark" aria-hidden="true">PB</div>
+        <div class="brand-copy">
+          <h1>PromptBridge</h1>
+          <p>网页上下文</p>
+        </div>
+        <span class="local-status">仅本地</span>
+      </header>
+
+      <main>
+        <section id="empty-state" class="empty-state">
+          <p>尚无捕获内容</p>
+        </section>
+
+        <section id="capture-view" class="capture-view" hidden>
+          <div class="source-block">
+            <p id="page-title" class="page-title"></p>
+            <div class="source-row">
+              <span id="source-origin"></span>
+              <time id="captured-at"></time>
+            </div>
+          </div>
+
+          <label class="section-label" for="captured-text">选中文本</label>
+          <textarea id="captured-text" readonly></textarea>
+
+          <div class="actions">
+            <button id="copy-button" class="primary-button" type="button" title="复制选中文本">
+              <i data-lucide="copy" aria-hidden="true"></i>
+              <span>复制</span>
+            </button>
+            <button id="clear-button" class="icon-button" type="button" title="清除捕获内容" aria-label="清除捕获内容">
+              <i data-lucide="trash-2" aria-hidden="true"></i>
+            </button>
+          </div>
+        </section>
+      </main>
+
+      <p id="status-message" class="status-message" role="status" aria-live="polite"></p>
+    </div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

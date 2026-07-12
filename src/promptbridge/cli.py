@@ -1,158 +1,267 @@
 from __future__ import annotations
 
 import argparse
+from getpass import getpass
+import json
 from pathlib import Path
 import sys
 
-from promptbridge.gateway.orchestrator import PromptBridgeOrchestrator
+from promptbridge.compiler import CompilationError
+from promptbridge.config import (
+    KeyringSecretStore,
+    ProfileError,
+    ProfileStore,
+    ProviderProfile,
+)
+from promptbridge.gateway import PromptBridge
+from promptbridge.providers import LLMClient, ProviderError
+from promptbridge.storage import AppPaths, GlossaryStore, GlossaryTerm, TraceStore
+
+
+DEFAULT_HOME = Path.home() / ".promptbridge"
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    orchestrator = PromptBridgeOrchestrator(args.workspace)
+    try:
+        return _main(argv)
+    except (CompilationError, ProfileError, ProviderError, ValueError, OSError, json.JSONDecodeError) as exc:
+        print(f"[PromptBridge] error: {exc}", file=sys.stderr)
+        if isinstance(exc, ProviderError) and exc.request_id:
+            print(f"[PromptBridge] request_id: {exc.request_id}", file=sys.stderr)
+        return 1
+
+
+def _main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    paths = AppPaths(args.home)
+    paths.ensure()
+    profiles = ProfileStore(paths.providers_file)
+    profiles.ensure()
+    secrets = KeyringSecretStore()
 
     if args.command == "init":
-        workspace = orchestrator.init_workspace()
-        print(f"Initialized PromptBridge workspace at: {workspace.root}")
-        print(f"- memory: {workspace.memory_dir}")
-        print(f"- ledger: {workspace.ledger_path}")
-        print(f"- traces: {workspace.traces_dir}")
+        print(f"PromptBridge home: {paths.home}")
+        print(f"Provider profiles: {paths.providers_file}")
+        print(f"Glossary: {paths.glossary_file}")
         return 0
 
-    if args.command == "compile":
-        text = " ".join(args.text)
-        result = orchestrator.compile(
-            text,
-            project_id=args.project,
-            max_tokens=args.max_tokens,
-            translator=args.translator,
-            model=args.model,
-            endpoint=args.endpoint,
-            target=args.target,
-            translation_timeout=args.translation_timeout,
-            api_key=args.api_key,
-        )
-        print(result.compiled_prompt.text)
-        print(f"\n[PromptBridge] prompt: {result.prompt_path}", file=sys.stderr)
-        print(f"[PromptBridge] trace: {result.trace_path}", file=sys.stderr)
-        print(
-            f"[PromptBridge] translation: {result.translation_result.provider}"
-            f" model={result.translation_result.model or 'none'}",
-            file=sys.stderr,
-        )
-        if result.target_package.artifact_path:
-            print(f"[PromptBridge] target package: {result.target_package.artifact_path}", file=sys.stderr)
-        if result.pii_findings:
-            print("[PromptBridge] PII was redacted before prompt assembly.", file=sys.stderr)
-        return 0
+    if args.command == "provider":
+        return _provider_command(args, profiles, secrets)
 
-    if args.command == "search-memory":
-        result = orchestrator.search_memory(args.query, limit=args.limit)
-        if not result.hits:
-            print("No memory hits.")
-            return 0
-        for hit in result.hits:
-            print(f"[{hit.strategy}] {hit.title} score={hit.score:.2f}")
-            print(f"  path: {hit.path}")
-            print(f"  ref: {hit.ref_id}")
-            print(f"  snippet: {hit.snippet}")
-        return 0
-
-    if args.command == "reconstruct":
-        result = orchestrator.reconstruct(
-            args.response_file,
-            target_language=args.to,
-            project_id=args.project,
-        )
-        print(result.response.text)
-        print(f"\n[PromptBridge] reconstructed: {result.output_path}", file=sys.stderr)
-        print(f"[PromptBridge] trace: {result.trace_path}", file=sys.stderr)
-        return 0
-
-    if args.command == "dream":
-        patch = orchestrator.dream(project_id=args.project)
-        print(patch.text)
-        print(f"\n[PromptBridge] memory patch proposal: {patch.path}", file=sys.stderr)
-        return 0
+    if args.command == "glossary":
+        return _glossary_command(args, GlossaryStore(paths.glossary_file))
 
     if args.command == "trace":
-        if args.trace_command == "show":
-            if args.target != "latest":
-                print("Only `pb trace show latest` is implemented in v0.", file=sys.stderr)
-                return 2
-            print(orchestrator.latest_trace_summary())
-            return 0
+        print(TraceStore(paths.traces_dir).summary())
+        return 0
 
-    parser.print_help()
+    gateway = PromptBridge(paths.home, profile_store=profiles, secret_store=secrets)
+    page_context = _read_optional_file(args.context_file)
+    user_input = " ".join(args.text).strip()
+
+    if args.command == "compile":
+        result = gateway.compile(
+            user_input,
+            provider=args.provider,
+            model=args.model,
+            output_language=args.to,
+            page_context=page_context,
+            timeout_seconds=args.timeout,
+            max_retries=args.max_retries,
+        )
+        print(result.prompt.text)
+        print(f"[PromptBridge] prompt: {result.prompt_path}", file=sys.stderr)
+        print(f"[PromptBridge] trace: {result.trace_path}", file=sys.stderr)
+        return 0
+
+    if args.command == "run":
+        result = gateway.run(
+            user_input,
+            provider=args.provider,
+            compiler_provider=args.compiler_provider,
+            model=args.model,
+            compiler_model=args.compiler_model,
+            output_language=args.to,
+            page_context=page_context,
+            timeout_seconds=args.timeout,
+            max_retries=args.max_retries,
+            max_output_tokens=args.max_output_tokens,
+        )
+        print(result.answer)
+        print(f"[PromptBridge] prompt: {result.prompt_path}", file=sys.stderr)
+        print(f"[PromptBridge] response: {result.response_path}", file=sys.stderr)
+        print(f"[PromptBridge] trace: {result.trace_path}", file=sys.stderr)
+        return 0
+
     return 2
+
+
+def _provider_command(
+    args: argparse.Namespace,
+    profiles: ProfileStore,
+    secrets: KeyringSecretStore,
+) -> int:
+    if args.provider_command == "add":
+        profile = ProviderProfile(
+            name=args.name,
+            protocol=args.protocol,
+            base_url=args.base_url,
+            default_model=args.model,
+            auth=args.auth,
+        )
+        profiles.add(profile)
+        print(f"Added provider {profile.name!r}. Active: {profiles.active_name()}")
+        if profile.auth == "bearer":
+            print(f"Next: pb provider set-key {profile.name}")
+        return 0
+
+    if args.provider_command == "list":
+        active = profiles.active_name()
+        items = profiles.list()
+        if not items:
+            print("No provider profiles configured.")
+            return 0
+        for profile in items:
+            marker = "*" if profile.name == active else " "
+            print(
+                f"{marker} {profile.name}: {profile.protocol} {profile.base_url} "
+                f"model={profile.default_model} auth={profile.auth}"
+            )
+        return 0
+
+    if args.provider_command == "use":
+        profiles.set_active(args.name)
+        print(f"Active provider: {args.name}")
+        return 0
+
+    if args.provider_command == "set-key":
+        profile = profiles.get(args.name)
+        secret = getpass(f"API key for {profile.name} ({profile.origin}): ")
+        secrets.set(profile, secret)
+        print(f"Stored API key for {profile.name!r} in the system credential store.")
+        return 0
+
+    if args.provider_command == "remove":
+        profile = profiles.get(args.name)
+        secrets.delete(profile)
+        profiles.remove(args.name)
+        print(f"Removed provider {args.name!r}.")
+        return 0
+
+    if args.provider_command == "test":
+        profile = profiles.get(args.name)
+        client = LLMClient(
+            profile,
+            api_key=secrets.get(profile),
+            timeout_seconds=args.timeout,
+            max_retries=args.max_retries,
+        )
+        response = client.generate(
+            instructions="Reply with exactly OK.",
+            input_text="Connection test.",
+            stage="connection-test",
+        )
+        print(response.text)
+        print(f"provider={profile.name} model={response.model} latency_ms={response.latency_ms}")
+        return 0
+    return 2
+
+
+def _glossary_command(args: argparse.Namespace, glossary: GlossaryStore) -> int:
+    if args.glossary_command == "add":
+        glossary.add(GlossaryTerm(args.term, args.translation, args.note))
+        print(f"Saved glossary term: {args.term}")
+        return 0
+    if args.glossary_command == "list":
+        terms = glossary.list()
+        if not terms:
+            print("No glossary terms configured.")
+            return 0
+        for term in terms:
+            detail = f" -> {term.translation}" if term.translation else ""
+            note = f" ({term.note})" if term.note else ""
+            print(f"{term.term}{detail}{note}")
+        return 0
+    if args.glossary_command == "remove":
+        glossary.remove(args.term)
+        print(f"Removed glossary term: {args.term}")
+        return 0
+    return 2
+
+
+def _read_optional_file(path: Path | None) -> str:
+    return path.read_text(encoding="utf-8") if path else ""
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pb",
-        description="PromptBridge local-first context gateway CLI.",
+        description="PromptBridge local-first multilingual model gateway.",
     )
     parser.add_argument(
-        "--workspace",
-        default="workspace",
-        help="Workspace directory for memory, ledger, traces, and compiled prompts.",
+        "--home",
+        type=Path,
+        default=DEFAULT_HOME,
+        help=f"Local config, artifacts, and traces directory (default: {DEFAULT_HOME}).",
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("init", help="Create the local PromptBridge directory.")
 
-    subparsers.add_parser("init", help="Create the local PromptBridge workspace.")
+    provider = commands.add_parser("provider", help="Manage model provider profiles.")
+    provider_commands = provider.add_subparsers(dest="provider_command", required=True)
+    add = provider_commands.add_parser("add", help="Add an OpenAI-compatible provider profile.")
+    add.add_argument("name")
+    add.add_argument("--protocol", choices=["responses", "chat"], required=True)
+    add.add_argument("--base-url", required=True, help="API base URL, usually ending in /v1.")
+    add.add_argument("--model", required=True, help="Default model id for this profile.")
+    add.add_argument("--auth", choices=["bearer", "none"], default="bearer")
+    provider_commands.add_parser("list", help="List provider profiles.")
+    use = provider_commands.add_parser("use", help="Set the active provider.")
+    use.add_argument("name")
+    set_key = provider_commands.add_parser("set-key", help="Save a key in the OS credential store.")
+    set_key.add_argument("name")
+    remove = provider_commands.add_parser("remove", help="Delete a provider and its stored key.")
+    remove.add_argument("name")
+    test = provider_commands.add_parser("test", help="Make a small live provider request.")
+    test.add_argument("name", nargs="?", default=None)
+    test.add_argument("--timeout", type=int, default=60)
+    test.add_argument("--max-retries", type=int, default=2)
 
-    compile_parser = subparsers.add_parser("compile", help="Compile user input into an execution prompt.")
-    compile_parser.add_argument("text", nargs="+", help="User input to compile.")
-    compile_parser.add_argument("--project", default="promptbridge", help="Active project id.")
-    compile_parser.add_argument("--max-tokens", type=int, default=6000, help="Context token budget.")
-    compile_parser.add_argument(
-        "--translator",
-        choices=["none", "ollama", "openai-compatible"],
-        default="none",
-        help="Local translation/rewrite provider to run before downstream prompt assembly.",
+    glossary = commands.add_parser("glossary", help="Manage exact technical-term locks.")
+    glossary_commands = glossary.add_subparsers(dest="glossary_command", required=True)
+    glossary_add = glossary_commands.add_parser("add")
+    glossary_add.add_argument("term")
+    glossary_add.add_argument("--translation", default="")
+    glossary_add.add_argument("--note", default="")
+    glossary_commands.add_parser("list")
+    glossary_remove = glossary_commands.add_parser("remove")
+    glossary_remove.add_argument("term")
+
+    compile_parser = commands.add_parser("compile", help="Compile a request for a web or CLI model.")
+    _add_request_arguments(compile_parser)
+
+    run_parser = commands.add_parser("run", help="Compile and execute a request through configured APIs.")
+    _add_request_arguments(run_parser)
+    run_parser.add_argument(
+        "--compiler-provider",
+        default=None,
+        help="Optional cheap/local profile for prompt compilation; defaults to --provider.",
     )
-    compile_parser.add_argument("--model", default=None, help="Local translator model name.")
-    compile_parser.add_argument("--endpoint", default=None, help="Local translator endpoint URL.")
-    compile_parser.add_argument(
-        "--translation-timeout",
-        type=int,
-        default=60,
-        help="Timeout in seconds for local translation provider calls.",
-    )
-    compile_parser.add_argument(
-        "--api-key",
-        default="local",
-        help="API key for OpenAI-compatible local providers; ignored by Ollama.",
-    )
-    compile_parser.add_argument(
-        "--target",
-        choices=["stdout", "web-gpt", "cli-plugin"],
-        default="stdout",
-        help="Where to package the compiled prompt after local translation.",
-    )
+    run_parser.add_argument("--compiler-model", default=None)
+    run_parser.add_argument("--max-output-tokens", type=int, default=None)
 
-    search_parser = subparsers.add_parser("search-memory", help="Search local memory files.")
-    search_parser.add_argument("query", help="Search query.")
-    search_parser.add_argument("--limit", type=int, default=8, help="Maximum hits to return.")
-
-    reconstruct_parser = subparsers.add_parser(
-        "reconstruct",
-        help="Reconstruct a model response while preserving code and locked terms.",
-    )
-    reconstruct_parser.add_argument("response_file", type=Path, help="Path to response markdown/text file.")
-    reconstruct_parser.add_argument("--to", default="zh", help="Target output language.")
-    reconstruct_parser.add_argument("--project", default="promptbridge", help="Active project id.")
-
-    dream_parser = subparsers.add_parser("dream", help="Generate a reviewable MemoryPatch proposal.")
-    dream_parser.add_argument("--project", default="promptbridge", help="Active project id.")
-
-    trace_parser = subparsers.add_parser("trace", help="Trace commands.")
-    trace_subparsers = trace_parser.add_subparsers(dest="trace_command", required=True)
-    trace_show = trace_subparsers.add_parser("show", help="Show trace summary.")
-    trace_show.add_argument("target", nargs="?", default="latest", help="Trace id or `latest`.")
-
+    commands.add_parser("trace", help="Show the latest metadata-only trace.")
     return parser
+
+
+def _add_request_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("text", nargs="+", help="Request to compile or execute.")
+    parser.add_argument("--provider", default=None, help="Provider profile; defaults to active.")
+    parser.add_argument("--model", default=None, help="Override the profile's default model.")
+    parser.add_argument("--to", default=None, help="Output language; defaults to the input language.")
+    parser.add_argument("--context-file", type=Path, default=None, help="Optional untrusted page context.")
+    parser.add_argument("--timeout", type=int, default=60)
+    parser.add_argument("--max-retries", type=int, default=2)
 
 
 if __name__ == "__main__":
